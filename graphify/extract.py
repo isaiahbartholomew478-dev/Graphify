@@ -50,6 +50,8 @@ from graphify.extractors.blade import extract_blade  # noqa: F401
 from graphify.extractors.cobol import extract_cobol  # noqa: F401
 from graphify.extractors.csharp import (
     CsharpNameResolver,
+    _is_cs_file,
+    _is_dotnet_source_file,
     _resolve_cross_file_csharp_imports,
     _resolve_csharp_type_references,
 )
@@ -3546,7 +3548,7 @@ def _rewire_unique_stub_nodes(nodes: list[dict], edges: list[dict]) -> None:
 
     for edge in edges:
         is_csharp_scoped_edge = (
-            str(edge.get("source_file", "")).endswith((".cs", ".razor", ".cshtml"))
+            _is_dotnet_source_file(str(edge.get("source_file", "")))
             and edge.get("relation") in csharp_scoped_relations
         )
         source = edge.get("source")
@@ -3554,7 +3556,7 @@ def _rewire_unique_stub_nodes(nodes: list[dict], edges: list[dict]) -> None:
             remapped_source = remap[str(source)]
             if not (
                 is_csharp_scoped_edge
-                and str(by_id.get(remapped_source, {}).get("source_file", "")).endswith(".cs")
+                and _is_cs_file(str(by_id.get(remapped_source, {}).get("source_file", "")))
             ) and not _cross_language_candidate(edge, remapped_source):
                 edge["source"] = remapped_source
         target = edge.get("target")
@@ -3562,7 +3564,7 @@ def _rewire_unique_stub_nodes(nodes: list[dict], edges: list[dict]) -> None:
             remapped_target = remap[str(target)]
             if not (
                 is_csharp_scoped_edge
-                and str(by_id.get(remapped_target, {}).get("source_file", "")).endswith(".cs")
+                and _is_cs_file(str(by_id.get(remapped_target, {}).get("source_file", "")))
             ) and not _names_own_builtin_base(
                 edge, str(target), remapped_target
             ) and not _cross_language_candidate(edge, remapped_target):
@@ -3745,7 +3747,7 @@ def _merge_csharp_partial_class_nodes(
     """
     groups: dict[tuple[str, str], list[dict]] = {}
     for n in all_nodes:
-        if not str(n.get("source_file", "")).endswith(".cs"):
+        if not _is_cs_file(str(n.get("source_file", ""))):
             continue
         if n.get("file_type") != "code":
             continue
@@ -4674,7 +4676,7 @@ def _resolve_csharp_member_calls(
         if e.get("relation") != "inherits":
             continue
         src_file = e.get("source_file")
-        if not (isinstance(src_file, str) and src_file.endswith(".cs")):
+        if not _is_cs_file(src_file):
             continue
         src, tgt = e.get("source"), e.get("target")
         if not (isinstance(src, str) and isinstance(tgt, str)):
@@ -8905,7 +8907,7 @@ def extract(
         # legitimately call across files without an explicit import. Scoped to
         # direct calls: the indirect_call path above is already conservative
         # (INFERRED, callable-target-gated) and independent of import evidence.
-        if not has_import_evidence and str(rc.get("source_file", "")).endswith(_JS_TS_CALL_SUFFIXES):
+        if not has_import_evidence and effective_suffix(str(rc.get("source_file", ""))) in _JS_TS_CALL_SUFFIXES:
             continue
         if rc.get("via_stub") and not (has_import_evidence or stub_scope_hit):
             continue
