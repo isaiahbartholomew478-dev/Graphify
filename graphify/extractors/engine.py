@@ -6928,6 +6928,12 @@ def _extract_generic(
     seen_static_ref_pairs: set[tuple[str, str, str]] = set()
     seen_helper_ref_pairs: set[tuple[str, str, str]] = set()
     seen_bind_pairs: set[tuple[str, str, str]] = set()
+    # C#: node ids of the member_access_expression that is an invocation's
+    # callee (`db.Users.Where` in `db.Users.Where(...)`), recorded when the
+    # invocation is visited so the member-access branch below can tell it
+    # apart from a property read (#3528) without asking tree-sitter for
+    # `node.parent`, which re-descends from the root on every call.
+    csharp_callee_ids: set[int] = set()
     raw_calls: list[dict] = []  # unresolved calls for cross-file resolution in extract()
     # Ruby: per-method `var -> ClassName` table from `var = Const.new` bindings,
     # populated before walk_calls runs. Lets member-call raw_calls carry a
@@ -7394,6 +7400,8 @@ def _extract_generic(
                 fn_node = node.child_by_field_name("function")
                 member_parts = _csharp_member_call_parts(fn_node)
                 if member_parts is not None:
+                    if fn_node.type == "member_access_expression":
+                        csharp_callee_ids.add(fn_node.id)
                     mname, recv = member_parts
                     if mname is not None:
                         # `recv.Get<int>(...)`: the name field is a
@@ -8046,14 +8054,16 @@ def _extract_generic(
         # member calls use, for _resolve_csharp_member_calls to bind to the
         # receiver type's property node. The callee of an invocation is its
         # `function` field, and that is the only member_access_expression
-        # ever parented directly by one (arguments sit under argument_list),
-        # so the parent check is what separates `db.Users` from
+        # ever parented directly by one (arguments sit under argument_list);
+        # the walk is pre-order, so the invocation branch above has already
+        # put that node's id in csharp_callee_ids by the time the walk reaches
+        # it, and the id check is what separates `db.Users` from
         # `db.Users.Add`. A generic_name member (`db.Set<T>`) is a call, not a
         # property, and is left to the call-site type-argument pass (#2911).
         if (
             config.ts_module == "tree_sitter_c_sharp"
             and node.type == "member_access_expression"
-            and not (node.parent is not None and node.parent.type == "invocation_expression")
+            and node.id not in csharp_callee_ids
         ):
             member_name = node.child_by_field_name("name")
             access_receiver = (

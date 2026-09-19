@@ -398,3 +398,24 @@ def test_untypable_lowercase_receiver_records_no_raw_entry(tmp_path):
     )
     entries = [rc for rc in extract_csharp(p)["raw_calls"] if rc.get("is_member_access")]
     assert entries == []
+
+
+def test_invocation_callee_is_a_call_entry_not_an_access_entry(tmp_path):
+    # `db.Save()` reaches the walk twice: once as the invocation, once as the
+    # member_access_expression that is its callee. The callee must surface
+    # only as the call — never as a second, dead access entry for `Save`.
+    # The walk is pre-order, so the invocation records the callee's node id
+    # before the access branch reaches it; nested and chained shapes must
+    # keep that straight too.
+    p = tmp_path / "S.cs"
+    p.write_text(
+        "public class Svc {\n"
+        "    private Ctx db;\n"
+        "    public void Q() { db.Save(); db.Log(db.Users); db.Users.Add(db.Orders.First()); }\n"
+        "}\n"
+    )
+    raw = [rc for rc in extract_csharp(p)["raw_calls"] if rc.get("lang") == "csharp"]
+    accesses = sorted(rc["callee"] for rc in raw if rc.get("is_member_access"))
+    calls = sorted(rc["callee"] for rc in raw if not rc.get("is_member_access"))
+    assert accesses == ["Orders", "Users", "Users"]
+    assert calls == ["Add", "First", "Log", "Save"]

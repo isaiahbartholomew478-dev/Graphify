@@ -4734,35 +4734,31 @@ def _resolve_csharp_member_calls(
     resolver = CsharpNameResolver(all_nodes, all_edges)
 
     # (type_node_id, method_key) -> method_node_id, and caller -> enclosing type.
-    # C# owns its methods via `method` edges.
+    # C# owns its methods via `method` edges. property_index is the member-
+    # access twin (#3528): (type_node_id, property_key) -> property_node_id. A
+    # C# property is the target of a `defines` edge from its type (#3006); C++
+    # data members ride the same relation, so keep to targets declared in a
+    # .cs file — a receiver typed by bare-name fallback must not reach a
+    # same-named C++ member. One pass over the edges fills both.
     method_index: dict[tuple[str, str], str] = {}
+    property_index: dict[tuple[str, str], str] = {}
     enclosing_type: dict[str, str] = {}
     for e in all_edges:
-        if e.get("relation") != "method":
+        rel = e.get("relation")
+        if rel != "method" and rel != "defines":
             continue
         src, tgt = e.get("source"), e.get("target")
         tnode = node_by_id.get(tgt)
         if tnode is None:
             continue
-        enclosing_type.setdefault(tgt, src)
-        method_index[(src, _key(tnode.get("label", "")))] = tgt
-
-    # (type_node_id, property_key) -> property_node_id, the member-access twin
-    # of method_index (#3528). A C# property is the target of a `defines` edge
-    # from its type (#3006); C++ data members ride the same relation, so keep
-    # to targets declared in a .cs file — a receiver typed by bare-name
-    # fallback must not reach a same-named C++ member.
-    property_index: dict[tuple[str, str], str] = {}
-    for e in all_edges:
-        if e.get("relation") != "defines":
-            continue
-        src, tgt = e.get("source"), e.get("target")
-        if not (isinstance(src, str) and isinstance(tgt, str)):
-            continue
-        tnode = node_by_id.get(tgt)
-        if tnode is None or not str(tnode.get("source_file", "")).endswith(".cs"):
-            continue
-        property_index[(src, _key(tnode.get("label", "")))] = tgt
+        if rel == "method":
+            enclosing_type.setdefault(tgt, src)
+            method_index[(src, _key(tnode.get("label", "")))] = tgt
+        elif (
+            isinstance(src, str) and isinstance(tgt, str)
+            and str(tnode.get("source_file", "")).endswith(".cs")
+        ):
+            property_index[(src, _key(tnode.get("label", "")))] = tgt
 
     # Base-class chain from `inherits` edges (C# files only). The type-reference
     # pass has already re-pointed each resolvable base to its real definition and
@@ -4816,6 +4812,13 @@ def _resolve_csharp_member_calls(
             frontier.extend(bases_of.get(nid, []))
         return next(iter(hits)) if len(hits) == 1 else None
 
+    # (type_name, caller_nid, src_file) -> resolved type nid, or None. A
+    # method reads and calls the same receiver (`db`, `_context`) many times
+    # over, and every member access (#3528) is one more entry that types it,
+    # so resolve each name once per caller rather than re-walking the
+    # namespace/using scope chain for every site.
+    type_nid_memo: dict[tuple[str, str | None, str], str | None] = {}
+
     def _resolve_type_name_nid(type_name: str | None, caller_node: dict | None,
                                src_file: str) -> str | None:
         """Resolve a declared type name to exactly one definition node id.
@@ -4828,16 +4831,24 @@ def _resolve_csharp_member_calls(
         """
         if not type_name:
             return None
+        memo_key = (
+            type_name,
+            caller_node.get("id") if caller_node is not None else None,
+            src_file,
+        )
+        if memo_key in type_nid_memo:
+            return type_nid_memo[memo_key]
+        type_nid: str | None = None
+        decisive = False
         if caller_node is not None:
-            resolved, decisive = resolver.resolve_type_name(
+            type_nid, decisive = resolver.resolve_type_name(
                 type_name, caller_node, src_file
             )
-            if resolved:
-                return resolved
-            if decisive:
-                return None
-        type_defs = type_def_nids.get(_key(type_name), [])
-        return type_defs[0] if len(type_defs) == 1 else None
+        if not type_nid and not decisive:
+            type_defs = type_def_nids.get(_key(type_name), [])
+            type_nid = type_defs[0] if len(type_defs) == 1 else None
+        type_nid_memo[memo_key] = type_nid
+        return type_nid
 
     def _park_if_absent(type_name: str | None, caller_node: dict | None, rc: dict) -> None:
         """Park a call whose receiver type is declared nowhere in this corpus (#3152).
